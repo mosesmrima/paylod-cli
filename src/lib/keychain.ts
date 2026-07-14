@@ -2,7 +2,7 @@
  * OS keychain storage for the OAuth refresh token, with a safe file fallback.
  *
  * `@napi-rs/keyring` is a NATIVE module and is declared in `optionalDependencies`
- * on purpose: `npx paylod` must never fail to install because a prebuilt binary is
+ * on purpose: `npx @paylod/cli` must never fail to install because a prebuilt binary is
  * missing for someone's platform. If the import fails for ANY reason we silently
  * fall back to the 0600 config file, which is what gh/vercel/wrangler effectively
  * do anyway. Storage location is reported by `paylod whoami` so the user always

@@ -34,20 +34,22 @@ This CLI puts all of that — plus a webhook forwarder that **kills ngrok** — 
 ## Install
 
 ```bash
-npx paylod errors 1032        # zero install, works right now
-npm install -g paylod         # or install it properly
+npx @paylod/cli errors 1032   # zero install, works right now
+npm install -g @paylod/cli    # or install it properly
 ```
+
+The package is `@paylod/cli`; the command it installs is `paylod`.
 
 Node ≥ 20. Works on Linux, macOS and Windows.
 
 ## Quickstart — five lines to your first STK push
 
 ```bash
-npx paylod login                                    # 1. browser opens, you approve
-npx paylod apps create --name "My Shop"             # 2. create an app (mints an API key)
-npx paylod creds set                                # 3. paste your Daraja keys (masked prompts)
-npx paylod collect --phone 254712345678 --amount 1  # 4. the phone rings
-npx paylod listen --forward localhost:3000/webhook  # 5. webhooks on localhost, no tunnel
+paylod login                                    # 1. browser opens, you approve
+paylod apps create --name "My Shop"             # 2. create an app (mints an API key)
+paylod creds set                                # 3. paste your Daraja keys (masked prompts)
+paylod collect --phone 254712345678 --amount 1  # 4. the phone rings
+paylod listen --forward localhost:3000/webhook  # 5. webhooks on localhost, no tunnel
 ```
 
 **No Daraja credentials yet?** You don't need them to start:
@@ -186,7 +188,7 @@ paylod has two auth planes and the CLI speaks both:
 Tokens are stored, in order of preference:
 
 1. **OS keychain** (macOS Keychain / Windows Credential Manager / libsecret) via the optional
-   native `@napi-rs/keyring`. It's an `optionalDependency` on purpose — `npx paylod` must never
+   native `@napi-rs/keyring`. It's an `optionalDependency` on purpose — `npx @paylod/cli` must never
    fail to install because a prebuilt binary is missing for your platform.
 2. **A `0600` file** at `~/.config/paylod/config.json` (dir `0700`), written atomically. This is
    the same fallback `gh` and `stripe` ship.

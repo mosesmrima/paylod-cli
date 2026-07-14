@@ -1,5 +1,5 @@
 /**
- * `paylod init` — the guided path from "npx paylod" to a working STK push.
+ * `paylod init` — the guided path from "npx @paylod/cli" to a working STK push.
  *
  * It is deliberately a thin ORCHESTRATOR over the other commands rather than a
  * fourth implementation of login/apps/creds: it checks what you already have and
