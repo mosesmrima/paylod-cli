@@ -1,7 +1,7 @@
 {
   "name": "@paylod/cli",
-  "version": "0.1.0",
-  "description": "The paylod CLI \u2014 accept M-Pesa (Safaricom Daraja) payments from your terminal. STK push, live status, webhook forwarding, and offline Daraja error decoding.",
+  "version": "0.2.0",
+  "description": "The paylod CLI — accept M-Pesa (Safaricom Daraja) payments from your terminal. STK push, live status, webhook forwarding, and offline Daraja error decoding.",
   "homepage": "https://paylod.dev/docs/cli",
   "bugs": {
     "url": "https://github.com/paylod/cli/issues"
@@ -25,11 +25,14 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
     "dev": "tsc -p tsconfig.json --watch",
     "start": "node dist/index.js",
-    "test": "node --test dist/**/*.test.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build"
+    "test": "npm run build:test && node --test \"build/test/lib/*.test.js\" \"build/test/commands/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "catalog:sync": "node scripts/vendor-daraja-catalog.mjs",
+    "catalog:check": "node scripts/vendor-daraja-catalog.mjs --check",
+    "prepublishOnly": "npm run catalog:check && npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "mpesa",

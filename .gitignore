@@ -8,3 +8,4 @@ dist/
 # Never commit a real credential store.
 .paylod/
 paylod.config.json
+build/

@@ -16,5 +16,7 @@
     "sourceMap": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "//": "Tests are excluded from the PUBLISHED build — dist/ is what ships. They are compiled separately by tsconfig.test.json into build/test/, which npm test runs.",
+  "exclude": ["src/**/*.test.ts", "src/test/**"]
 }

@@ -32,7 +32,7 @@ import { initCommand } from "./commands/init.js";
 import { paymentsCommand } from "./commands/payments.js";
 import { orgsCommand } from "./commands/orgs.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 const BANNER = `
   ${c.bold("paylod")} ${c.dim("— M-Pesa without the Daraja tax.")}
@@ -59,10 +59,24 @@ function buildProgram(): Command {
 ${c.dim("Environment")}
   PAYLOD_API_KEY          merchant API key (skips the config file — use this in CI)
   PAYLOD_API_BASE         override the API base URL
+  PAYLOD_AS_ISSUER        override the OAuth authorization server
   PAYLOD_WEBHOOK_SECRET   webhook signing secret for \`paylod listen\`
-  PAYLOD_CONFIG_DIR       where the CLI stores its config (default ~/.config/paylod)
-  PAYLOD_NO_KEYCHAIN=1    never use the OS keychain; use the 0600 file instead
+  PAYLOD_CONFIG_DIR       where the CLI stores its config (see below)
+  PAYLOD_NO_KEYCHAIN=1    never use the OS keychain; use the credential file instead
   NO_COLOR                disable colour
+
+  PAYLOD_SUPPRESS_PERMISSION_WARNING=1
+                          silence the warning shown when paylod cannot restrict
+                          access to your credential file. Only set this if you
+                          have read that warning and accepted the risk.
+
+${c.dim("Where your credentials live")}
+  Linux     \$XDG_CONFIG_HOME/paylod  or  ~/.config/paylod
+  macOS     ~/Library/Application Support/paylod
+  Windows   %APPDATA%\\paylod
+  An existing ~/.config/paylod from an older version keeps being used.
+  The file is restricted to your user (0600 on Unix, an explicit ACL on Windows).
+  If that cannot be done, paylod says so — it does not pretend.
 
 ${c.dim("Docs")}  https://paylod.dev/docs
 `,
@@ -99,7 +113,21 @@ ${c.dim("Docs")}  https://paylod.dev/docs
 
   program.addCommand(errorsCommand());
 
+  // Commander EXITS THE PROCESS ITSELF on a usage error (process.exit(1)) unless every
+  // command has exitOverride() set. Without this, the try/catch in main() below never
+  // runs for a bad flag or an unknown command, and the documented "exit 2 = bad usage"
+  // contract silently did not exist: `paylod collect` with no --phone exited 1, exactly
+  // like a network failure. Scripts branching on the exit code could not tell the two
+  // apart. exitOverride is NOT inherited by subcommands, so we walk the tree.
+  applyExitOverride(program);
+
   return program;
+}
+
+/** Make every command in the tree throw instead of calling process.exit. */
+function applyExitOverride(cmd: Command): void {
+  cmd.exitOverride();
+  for (const sub of cmd.commands) applyExitOverride(sub);
 }
 
 /** The single error renderer. Nothing else in the CLI prints a fatal error. */
@@ -147,17 +175,23 @@ async function main(): Promise<void> {
       (err as { code: string }).code.startsWith("commander.")
     ) {
       const code = (err as { code: string; exitCode?: number }).code;
-      if (code === "commander.helpDisplayed" || code === "commander.version" || code === "commander.help") {
+
+      // --help and --version are not failures. Commander signals them as thrown errors
+      // once exitOverride is on, so they must be allow-listed explicitly.
+      if (
+        code === "commander.helpDisplayed" ||
+        code === "commander.help" ||
+        code === "commander.version"
+      ) {
         return;
       }
-      // Usage errors are exit 2 by convention; commander reports some of them as 1.
-      const usageError =
-        code === "commander.unknownCommand" ||
-        code === "commander.unknownOption" ||
-        code === "commander.missingArgument" ||
-        code === "commander.missingMandatoryOptionValue" ||
-        code === "commander.invalidArgument";
-      process.exitCode = usageError ? 2 : ((err as { exitCode?: number }).exitCode ?? 2);
+
+      // Everything else commander raises is a USAGE error: an unknown command, an unknown
+      // option, a missing required argument, a missing required option, a bad option value,
+      // too many arguments. All of them are exit 2 — the user's argv was wrong, and no
+      // network call was made. Deliberately a catch-all rather than a list of codes, so a
+      // commander upgrade that adds a new error code cannot silently start exiting 1 again.
+      process.exitCode = 2;
       return;
     }
     process.exitCode = render(err);

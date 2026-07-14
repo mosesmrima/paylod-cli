@@ -15,7 +15,7 @@ import {
   resolveApiKey,
   type Config,
 } from "./config.js";
-import { getSecret, setSecret } from "./keychain.js";
+import { getSecret, setSecret, type FallbackReason, type SecretBackend } from "./keychain.js";
 import { refreshToken } from "./oauth.js";
 import { NoApiKeyError, NotAuthenticatedError } from "./errors.js";
 
@@ -72,6 +72,18 @@ export async function requireOAuth(what = "This command"): Promise<Session> {
   };
 }
 
+export interface PersistResult {
+  readonly backend: SecretBackend;
+  /**
+   * Why the refresh token went to a FILE rather than the OS keychain. Present only when
+   * `backend === "file"`. Callers MUST surface this — a silent downgrade from "keychain"
+   * to "file" is exactly the class of bug this CLI is trying not to have.
+   */
+  readonly reason?: FallbackReason;
+  /** Whether we could actually restrict the config file to this user. */
+  readonly fileProtected: boolean;
+}
+
 /**
  * Persist a token set: refresh token to the keychain when available (and NOT to the
  * config file in that case), access token + metadata to the config file.
@@ -85,11 +97,14 @@ export async function persistTokens(
     scope: string;
     clientId: string;
   },
-): Promise<"keychain" | "file"> {
-  let backend: "keychain" | "file" = "file";
+): Promise<PersistResult> {
+  let backend: SecretBackend = "file";
+  let reason: FallbackReason | undefined;
 
   if (tokens.refreshToken) {
-    backend = await setSecret(refreshAccount(config.currentProfile), tokens.refreshToken);
+    const stored = await setSecret(refreshAccount(config.currentProfile), tokens.refreshToken);
+    backend = stored.backend;
+    reason = stored.reason;
   }
 
   const next = withProfile(config, {
@@ -104,8 +119,14 @@ export async function persistTokens(
       clientId: tokens.clientId,
     },
   });
-  saveConfig(next);
-  return backend;
+  // saveConfig itself warns on stderr if it could not protect the file.
+  const protection = saveConfig(next);
+
+  return {
+    backend,
+    ...(backend === "file" && reason ? { reason } : {}),
+    fileProtected: protection.protected,
+  };
 }
 
 export interface ApiKeySession {

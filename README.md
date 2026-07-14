@@ -190,11 +190,43 @@ Tokens are stored, in order of preference:
 1. **OS keychain** (macOS Keychain / Windows Credential Manager / libsecret) via the optional
    native `@napi-rs/keyring`. It's an `optionalDependency` on purpose — `npx @paylod/cli` must never
    fail to install because a prebuilt binary is missing for your platform.
-2. **A `0600` file** at `~/.config/paylod/config.json` (dir `0700`), written atomically. This is
-   the same fallback `gh` and `stripe` ship.
+2. **A user-restricted file**, written atomically. This is the same fallback `gh` and `stripe` ship.
 
-`paylod whoami` always tells you which one is in use. Only the **refresh** token goes to the
-keychain; the short-lived access token stays in the config file.
+Only the **refresh** token goes to the keychain; the short-lived access token stays in the
+config file.
+
+**When the keychain is not used, paylod tells you, and tells you why.** A refresh token in the
+macOS Keychain and a refresh token in a file are not the same security posture, and you are the
+only one who can decide whether the difference matters to you. `paylod login` and
+`paylod whoami` both report which store is in use and, if it is the file, the reason.
+
+### Where the credential file lives
+
+| Platform | Path |
+|---|---|
+| Linux | `$XDG_CONFIG_HOME/paylod` or `~/.config/paylod` |
+| macOS | `~/Library/Application Support/paylod` |
+| Windows | `%APPDATA%\paylod` |
+
+`PAYLOD_CONFIG_DIR` overrides all of them. If you already have a `~/.config/paylod` from an
+older version, paylod keeps using it, so upgrading never strands your login.
+
+### How the file is protected
+
+| Platform | Mechanism |
+|---|---|
+| Linux / macOS | `0600` file inside a `0700` directory — then **verified** with `stat`. |
+| Windows | An explicit ACL (`icacls /inheritance:r /grant:r <you>:F`) — then **verified** by re-reading the ACL. |
+
+> **Fixed in 0.2.0.** Through 0.1.0 the CLI called `chmod(0600)` on every platform and called
+> that the guarantee. On Windows `chmod` is a **no-op**: it does not throw, and it does not
+> restrict anyone. The credential file — holding OAuth tokens and `mp_live_` API keys that move
+> real money — landed with inherited ACLs and was readable by other users of the machine.
+>
+> paylod now applies the mechanism that actually works on the host, verifies it, and **if it
+> cannot protect the file, says so loudly on stderr** rather than claiming a protection it does
+> not provide. `paylod whoami` reports the file's real, freshly-measured state.
+
 
 **Scopes.** paylod's consent screen defaults the high-risk scopes (`keys.mint`,
 `credentials.write`, `payments.payout`) to **OFF**. If you didn't tick one, the CLI says exactly
@@ -213,8 +245,10 @@ that:
 | `PAYLOD_API_KEY` | Merchant API key — skips the config file entirely. Use this in CI. |
 | `PAYLOD_API_BASE` | Override the API base URL (default `https://paylod.dev/functions/v1`). |
 | `PAYLOD_WEBHOOK_SECRET` | Signing secret for `paylod listen`. |
-| `PAYLOD_CONFIG_DIR` | Where config lives (default `~/.config/paylod`). |
-| `PAYLOD_NO_KEYCHAIN=1` | Never use the OS keychain; use the `0600` file. |
+| `PAYLOD_CONFIG_DIR` | Where config lives (see "Where the credential file lives"). |
+| `PAYLOD_NO_KEYCHAIN=1` | Never use the OS keychain; use the credential file. |
+| `PAYLOD_AS_ISSUER` | Override the OAuth authorization server. |
+| `PAYLOD_SUPPRESS_PERMISSION_WARNING=1` | Silence the "could not restrict your credential file" warning. Only if you have read it and accepted the risk. |
 | `PAYLOD_DEBUG=1` | Print stack traces. |
 | `NO_COLOR` | Disable colour. |
 
@@ -250,3 +284,35 @@ node dist/index.js errors 1032
 ```
 
 MIT.
+
+
+## Development
+
+```bash
+npm run build          # compile to dist/ (what ships — tests excluded)
+npm test               # compile tests to build/test/ and run them
+npm run typecheck      # type-check everything, including tests
+npm run catalog:check  # fail if the vendored Daraja catalog has drifted
+```
+
+### The Daraja error catalog is GENERATED — do not hand-edit it
+
+`src/lib/daraja-catalog.ts` and `src/lib/daraja-error-codes.ts` are vendored from the paylod
+monorepo's single source of truth by `scripts/vendor-daraja-catalog.mjs`. They carry a
+DO-NOT-EDIT banner.
+
+This matters more than it looks. `retryable` in that table means **safe to charge again** — not
+"the user could try again". Hand-maintained copies of this table drifting from the payment
+engine have shipped a customer-facing **double charge twice**. Through 0.1.0 the CLI carried a
+fifth, hand-written fork of it, which had already drifted: unknown codes decoded as
+`retryable: true` (inviting a blind re-charge of a payment whose outcome we cannot prove), and
+`1037` claimed the customer's handset was unreachable when in fact they had usually just ignored
+the prompt.
+
+```bash
+node scripts/vendor-daraja-catalog.mjs            # regenerate from the monorepo
+node scripts/vendor-daraja-catalog.mjs --check    # CI drift guard (exit 1 on drift)
+```
+
+The monorepo is found at `../mpesa`, or wherever `PAYLOD_MONOREPO` points. Without it, `--check`
+skips — the generated files are committed, so building the CLI never requires the monorepo.

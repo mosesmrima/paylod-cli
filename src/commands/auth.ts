@@ -3,8 +3,8 @@
  *
  * login  — OAuth 2.1 authorization-code + PKCE over a loopback redirect (RFC 8252).
  *          Opens the browser, waits for the consent screen, stores the refresh token
- *          in the OS keychain when one is available (else a 0600 file) and reports
- *          which of the two it used. No secret is ever printed.
+ *          in the OS keychain when one is available (else a user-restricted file) and
+ *          reports which of the two it used, AND WHY. No secret is ever printed.
  * whoami — shows the active profile, granted scopes, and WHERE the token lives.
  * logout — revokes nothing server-side (the AS has /revoke; wired below) and wipes
  *          local credentials from both the keychain and the config file.
@@ -23,9 +23,11 @@ import {
 } from "../lib/config.js";
 import { startLogin, openBrowser } from "../lib/oauth.js";
 import { persistTokens, refreshAccount, requireOAuth } from "../lib/session.js";
-import { deleteSecret, getSecret, activeBackend } from "../lib/keychain.js";
+import { deleteSecret, getSecret, keychainStatus } from "../lib/keychain.js";
+import { inspectPath } from "../lib/platform.js";
 import { oauthRequest, type AppsResponse } from "../lib/client.js";
-import { color as c, emit, isJson, kv, line, ok, spinner, info, rule } from "../lib/ui.js";
+import { color as c, emit, isJson, kv, line, ok, spinner, info, rule, warn } from "../lib/ui.js";
+import { existsSync } from "node:fs";
 
 export function loginCommand(): Command {
   return new Command("login")
@@ -62,7 +64,8 @@ export function loginCommand(): Command {
       spin.succeed("Approved.");
 
       const config = loadConfig();
-      const backend = await persistTokens(config, tokens);
+      const stored = await persistTokens(config, tokens);
+      const backend = stored.backend;
 
       // Best-effort: pick a sensible default app so `collect`/`simulate` "just work".
       let defaultApp: string | undefined;
@@ -99,6 +102,8 @@ export function loginCommand(): Command {
           ok: true,
           scopes: tokens.scope.split(/\s+/).filter(Boolean),
           storage: backend,
+          ...(stored.reason ? { storageFallbackReason: stored.reason } : {}),
+          fileProtected: stored.fileProtected,
           ...(defaultApp ? { applicationId: defaultApp } : {}),
         });
         return;
@@ -113,10 +118,23 @@ export function loginCommand(): Command {
           "token stored in",
           backend === "keychain"
             ? `${c.green("OS keychain")}`
-            : `${c.yellow("file")} ${c.dim(`${configPath()} (0600)`)}`,
+            : `${c.yellow("file")} ${c.dim(configPath())}`,
         ],
         ...(defaultApp ? [["default app", c.dim(defaultApp)] as const] : []),
       ]);
+
+      // The keychain fallback is a real downgrade in how well your refresh token is
+      // protected. Say it out loud — 0.1.0 did this silently.
+      if (backend === "file" && stored.reason) {
+        line();
+        warn(`Your refresh token is in a FILE, not the OS keychain — ${stored.reason}.`);
+        line(c.dim(`  ${configPath()}`));
+        if (stored.fileProtected) {
+          line(c.dim("  The file is restricted to your user account."));
+        }
+        // When it is NOT protected, saveConfig has already printed the loud warning.
+      }
+
       line();
       line(`  ${c.dim("Next:")} ${c.cyan("paylod collect --phone 2547… --amount 10")}`);
       line();
@@ -172,7 +190,13 @@ export function whoamiCommand(): Command {
       const session = await requireOAuth("`paylod whoami`");
       const config = loadConfig();
       const profile = currentProfile(config);
-      const backend = await activeBackend();
+      const keychain = await keychainStatus();
+      const backend = keychain.available ? "keychain" : "file";
+      // Report the ACTUAL protection of the credential file, freshly measured — not a
+      // claim about what chmod was asked to do.
+      const fileProtection = existsSync(configPath())
+        ? inspectPath(configPath())
+        : undefined;
 
       const spin = spinner("Checking your session…");
       let apps: AppsResponse;
@@ -198,6 +222,10 @@ export function whoamiCommand(): Command {
           apiBase: session.apiBase,
           scopes: session.scopes,
           storage: backend,
+          ...(keychain.reason ? { storageFallbackReason: keychain.reason } : {}),
+          configPath: configPath(),
+          credentialFileProtected: fileProtection?.protected ?? null,
+          ...(fileProtection ? { credentialFileProtection: fileProtection.mechanism } : {}),
           organizationId: org ?? null,
           applications: apps.applications.length,
           defaultApplicationId: profile.applicationId ?? null,
@@ -225,10 +253,27 @@ export function whoamiCommand(): Command {
         ],
         [
           "token in",
-          backend === "keychain" ? c.green("OS keychain") : `${c.yellow("file")} ${c.dim("(0600)")}`,
+          backend === "keychain"
+            ? c.green("OS keychain")
+            : `${c.yellow("file")} ${c.dim(configPath())}`,
         ],
+        ...(fileProtection
+          ? [
+              [
+                "file access",
+                fileProtection.protected
+                  ? `${c.green("you only")} ${c.dim(`(${fileProtection.mechanism})`)}`
+                  : c.red(`NOT RESTRICTED — ${fileProtection.detail}`),
+              ] as const,
+            ]
+          : []),
         ["scopes", session.scopes.join(", ") || "—"],
       ]);
+
+      if (!keychain.available && keychain.reason) {
+        line();
+        line(c.dim(`  OS keychain not in use: ${keychain.reason}.`));
+      }
       line();
     });
 }

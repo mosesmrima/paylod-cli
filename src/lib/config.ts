@@ -1,20 +1,38 @@
 /**
  * Config + credential persistence.
  *
- * Layout (XDG-ish, works on Linux/macOS/Windows):
- *   $PAYLOD_CONFIG_DIR  ||  $XDG_CONFIG_HOME/paylod  ||  ~/.config/paylod
- *     └── config.json      (0600 — profiles, tokens, API keys)
+ * Layout (conventional per platform — see platform.ts):
+ *   $PAYLOD_CONFIG_DIR                      (explicit override, always wins)
+ *   ~/.config/paylod                        (the 0.1.0 path — still read if it exists)
+ *   %APPDATA%\paylod                        (Windows)
+ *   ~/Library/Application Support/paylod    (macOS)
+ *   $XDG_CONFIG_HOME/paylod || ~/.config/paylod   (Linux)
+ *     └── config.json      (profiles, tokens, API keys)
  *
- * Secrets are written 0600 and the containing directory 0700. On platforms with
- * an OS keychain we store the OAuth refresh token there instead (see keychain.ts)
- * and leave only non-secret metadata in config.json.
+ * The file is restricted to the current user by `secureWriteFile`, which uses the
+ * mechanism that actually works on the host — 0600 on POSIX, an explicit ACL on
+ * Windows — and VERIFIES it. When it cannot, the user is told, loudly. It does not
+ * pretend. (0.1.0 called chmod(0600) on Windows, where it is a no-op, and called that
+ * a guarantee.)
+ *
+ * On platforms with an OS keychain we store the OAuth refresh token there instead (see
+ * keychain.ts) and leave only non-secret metadata in config.json.
  *
  * Everything here is immutable-in / immutable-out: mutators return a NEW config.
  */
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { readFileSync, existsSync, renameSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  legacyConfigDir,
+  platformConfigDir,
+  protectPath,
+  secureMkdir,
+  secureWriteFile,
+  warnIfUnprotected,
+  type Protection,
+} from "./platform.js";
 
 /** The one canonical resource the paylod AS will mint tokens for (RFC 8707 audience). */
 export const RESOURCE_URI = "https://mcp.paylod.dev/mcp";
@@ -71,59 +89,106 @@ export const EMPTY_CONFIG: Config = Object.freeze({
   profiles: Object.freeze({}),
 });
 
+/**
+ * Resolve the config directory.
+ *
+ * Order is load-bearing:
+ *   1. PAYLOD_CONFIG_DIR — an explicit override always wins (CI, tests, sandboxing).
+ *   2. The LEGACY 0.1.0 path, but ONLY if it already exists. Every 0.1.0 user on macOS
+ *      and Windows has their tokens in ~/.config/paylod; silently moving to the new
+ *      conventional path would log them out and strand a credential file behind. So we
+ *      keep using the old one when it is there, and only new installs get the new path.
+ *   3. The conventional per-platform location.
+ */
 export function configDir(): string {
   const explicit = process.env.PAYLOD_CONFIG_DIR;
   if (explicit) return explicit;
-  const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) return join(xdg, "paylod");
-  return join(homedir(), ".config", "paylod");
+
+  const legacy = legacyConfigDir();
+  const modern = platformConfigDir();
+  if (legacy !== modern && existsSync(join(legacy, "config.json"))) return legacy;
+
+  return modern;
 }
 
 export function configPath(): string {
   return join(configDir(), "config.json");
 }
 
-/** Read config from disk. A missing/corrupt file yields the empty config (never throws). */
+/**
+ * Read config from disk. A missing, corrupt, truncated or wrong-shaped file yields the
+ * empty config and NEVER throws — a half-written credential file must degrade to "you
+ * are logged out", not to a stack trace on every command.
+ *
+ * Each field is validated independently, so a config whose `profiles` key is garbage
+ * still yields a usable apiBase rather than throwing the whole file away.
+ */
 export function loadConfig(): Config {
   const path = configPath();
   if (!existsSync(path)) return EMPTY_CONFIG;
+
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<Config>;
-    return {
-      apiBase: parsed.apiBase ?? DEFAULT_API_BASE,
-      currentProfile: parsed.currentProfile ?? "default",
-      profiles: parsed.profiles ?? {},
-    };
+    parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return EMPTY_CONFIG;
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return EMPTY_CONFIG;
+
+  const p = parsed as Record<string, unknown>;
+  const profiles =
+    typeof p.profiles === "object" && p.profiles !== null && !Array.isArray(p.profiles)
+      ? (p.profiles as Record<string, Profile>)
+      : {};
+
+  return {
+    apiBase: typeof p.apiBase === "string" && p.apiBase ? p.apiBase : DEFAULT_API_BASE,
+    currentProfile:
+      typeof p.currentProfile === "string" && p.currentProfile ? p.currentProfile : "default",
+    profiles,
+  };
 }
 
 /**
- * Atomically write config with 0600 perms (0700 dir).
+ * Atomically write config, restricted to the current user.
  *
- * Write-to-temp + rename means a crash mid-write can never leave a truncated
- * credential file behind. chmod BEFORE the rename so the file is never briefly
- * world-readable at its final path.
+ * Write-to-temp + rename means a crash mid-write can never leave a truncated credential
+ * file behind. The temp file is created 0600 and locked down BEFORE the rename, so the
+ * bytes are never readable by anyone else, even for an instant, at either path.
+ *
+ * Returns the protection actually achieved. `saveConfig` warns the user when that is
+ * "none" — the whole point of this module. Callers who need to react to it (tests,
+ * `whoami`) can read the return value.
  */
-export function saveConfig(config: Config): void {
+export function saveConfig(config: Config): Protection {
   const dir = configDir();
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try {
-    chmodSync(dir, 0o700);
-  } catch {
-    /* Windows / non-POSIX: no-op. ACLs on %APPDATA% are already user-scoped. */
-  }
+  const dirProtection = secureMkdir(dir);
 
   const target = configPath();
   const tmp = join(dir, `.config.${process.pid}.tmp`);
-  writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+
+  let fileProtection: Protection;
   try {
-    chmodSync(tmp, 0o600);
-  } catch {
-    /* no-op on Windows */
+    fileProtection = secureWriteFile(tmp, `${JSON.stringify(config, null, 2)}\n`);
+    renameSync(tmp, target);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* nothing to clean up */
+    }
+    throw e;
   }
-  renameSync(tmp, target);
+
+  // rename(2) preserves the mode/ACL, but re-assert on the final path rather than
+  // assume it: on Windows the destination directory's inheritable ACEs are what we are
+  // defending against, and a replaced file can pick them up.
+  const finalProtection = protectPath(target, false);
+
+  const worst = [dirProtection, fileProtection, finalProtection].find((p) => !p.protected);
+  const result = worst ?? finalProtection;
+  warnIfUnprotected(target, result);
+  return result;
 }
 
 export function currentProfile(config: Config): Profile {

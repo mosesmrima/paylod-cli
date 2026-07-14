@@ -23,6 +23,7 @@ import {
 import { renderPayment } from "../lib/render.js";
 import { color as c, emit, isJson, kes, kv, line, rule, spinner } from "../lib/ui.js";
 import { PaylodError } from "../lib/errors.js";
+import { parseAmount } from "./collect.js";
 
 /** The outcomes paylod's simulator supports (supabase/functions/simulate). */
 const OUTCOMES = [
@@ -77,9 +78,14 @@ Examples:
         });
       }
 
-      const amount = Number.parseInt(String(opts.amount), 10);
-      if (!Number.isInteger(amount) || amount < 1) {
-        throw new PaylodError(`Invalid amount: ${opts.amount}`, { exitCode: 2 });
+      // Same strict parse as `collect` — see parseAmount(). A simulator that accepts
+      // `1.5` and quietly simulates `1` teaches the wrong thing about the real thing.
+      const amount = parseAmount(opts.amount);
+      if (amount === undefined) {
+        throw new PaylodError(`Invalid amount: ${opts.amount}`, {
+          hint: "Amount must be a whole number of KES between 1 and 150,000.",
+          exitCode: 2,
+        });
       }
 
       if (!isJson()) {

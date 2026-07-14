@@ -36,6 +36,23 @@ const DEFAULT_TIMEOUT_SECS = 120;
 /** Accepts 0712…, 254712…, +254712…, 0112…, 254112… — same shape the backend accepts. */
 const PHONE_RE = /^(?:\+?254|0)?[17]\d{8}$/;
 
+/**
+ * Parse an amount in whole KES, STRICTLY.
+ *
+ * `Number.parseInt` is the wrong tool for money and this is not a nitpick: `parseInt("1.5")`
+ * is `1`, and `parseInt("100abc")` is `100`. So `paylod collect --amount 1.5` used to charge
+ * the customer 1 shilling — silently, with no warning, having *looked* like it worked. An
+ * amount that is not exactly a whole number of shillings is a typo, and the only safe thing
+ * to do with a typo about money is refuse it.
+ */
+export function parseAmount(raw: unknown): number | undefined {
+  const s = String(raw ?? "").trim();
+  if (!/^\d+$/.test(s)) return undefined; // no decimals, no signs, no trailing junk, no ""
+  const n = Number(s);
+  if (!Number.isSafeInteger(n) || n < 1 || n > 150_000) return undefined;
+  return n;
+}
+
 export function collectCommand(): Command {
   return new Command("collect")
     .description("Send an M-Pesa STK Push and wait for the customer to pay")
@@ -59,10 +76,12 @@ Examples:
 `,
     )
     .action(async (opts: CollectOpts) => {
-      const amount = Number.parseInt(String(opts.amount), 10);
-      if (!Number.isInteger(amount) || amount < 1 || amount > 150_000) {
+      const amount = parseAmount(opts.amount);
+      if (amount === undefined) {
         throw new PaylodError(`Invalid amount: ${opts.amount}`, {
-          hint: "Amount must be a whole number of KES between 1 and 150,000.",
+          hint:
+            "Amount must be a whole number of KES between 1 and 150,000. " +
+            "M-Pesa does not accept cents — `1.5` is not a valid amount.",
           exitCode: 2,
         });
       }

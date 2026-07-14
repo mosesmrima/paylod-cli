@@ -22,11 +22,29 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { spawn } from "node:child_process";
 import { AS_ISSUER, RESOURCE_URI, ALL_SCOPES } from "./config.js";
+import { platform } from "./platform.js";
 import { PaylodError } from "./errors.js";
 
-const AUTHORIZE_ENDPOINT = `${AS_ISSUER}/authorize`;
-const TOKEN_ENDPOINT = `${AS_ISSUER}/token`;
-const REGISTRATION_ENDPOINT = `${AS_ISSUER}/register`;
+/**
+ * The authorization server, overridable via PAYLOD_AS_ISSUER.
+ *
+ * Read at CALL time, not at module load, for two reasons: a staging/self-hosted stack can
+ * point the CLI at its own AS without a rebuild, and the test suite can stand up a stub AS
+ * on a loopback port. The alternative — baking the production URL into a module constant —
+ * is precisely what makes an OAuth client untestable, and this one shipped untested.
+ */
+function asIssuer(): string {
+  return (process.env.PAYLOD_AS_ISSUER || AS_ISSUER).replace(/\/+$/, "");
+}
+
+const authorizeEndpoint = (): string => `${asIssuer()}/authorize`;
+const tokenEndpoint = (): string => `${asIssuer()}/token`;
+const registrationEndpoint = (): string => `${asIssuer()}/register`;
+
+/** The RFC 8707 resource the AS audience-binds tokens to. Overridable alongside the issuer. */
+function resourceUri(): string {
+  return process.env.PAYLOD_RESOURCE_URI || RESOURCE_URI;
+}
 
 /** Preferred loopback port (wrangler-style). We fall back to an ephemeral port if taken. */
 const PREFERRED_PORT = 8976;
@@ -61,7 +79,7 @@ interface TokenEndpointResponse {
 
 /** Register a fresh public client for THIS exact loopback redirect URI. */
 async function registerClient(redirectUri: string, scopes: readonly string[]): Promise<string> {
-  const res = await fetch(REGISTRATION_ENDPOINT, {
+  const res = await fetch(registrationEndpoint(), {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({
@@ -100,10 +118,10 @@ async function exchangeCode(params: {
     redirect_uri: params.redirectUri,
     client_id: params.clientId,
     // RFC 8707: the AS pins this to the MCP canonical URI and stamps it as `aud`.
-    resource: RESOURCE_URI,
+    resource: resourceUri(),
   });
 
-  const res = await fetch(TOKEN_ENDPOINT, {
+  const res = await fetch(tokenEndpoint(), {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -143,10 +161,10 @@ export async function refreshToken(
     grant_type: "refresh_token",
     refresh_token: refresh,
     client_id: clientId,
-    resource: RESOURCE_URI,
+    resource: resourceUri(),
   });
 
-  const res = await fetch(TOKEN_ENDPOINT, {
+  const res = await fetch(tokenEndpoint(), {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -169,13 +187,54 @@ export async function refreshToken(
   };
 }
 
+export interface BrowserCommand {
+  readonly cmd: string;
+  readonly args: readonly string[];
+  /** Windows only: pass the command line through to cmd.exe unmangled. */
+  readonly windowsVerbatimArguments: boolean;
+}
+
+/**
+ * Build the platform's "open this URL" command. Pure, and exported, so the Windows and macOS
+ * branches can be tested from Linux.
+ *
+ * ⚠️ The Windows branch is not merely "different", it was BROKEN. 0.1.0 ran:
+ *
+ *     spawn("cmd", ["/c", "start", "", url])
+ *
+ * `cmd.exe` re-parses its command line, and `&` is its command SEPARATOR. Every authorize
+ * URL we generate is full of them (`?response_type=code&client_id=…&state=…`). So on Windows
+ * that command truncated the URL at the first `&` — login could never have worked — and then
+ * handed the remainder to cmd.exe AS COMMANDS. `…&scope=paylod:apps.write` is harmless; a URL
+ * we did not control would not be. We escape `&` as `^&` and quote the URL, which is what the
+ * `open` package does, and pass windowsVerbatimArguments so Node does not re-quote around us.
+ */
+export function browserCommand(url: string, plat: NodeJS.Platform = platform()): BrowserCommand {
+  switch (plat) {
+    case "darwin":
+      return { cmd: "open", args: [url], windowsVerbatimArguments: false };
+    case "win32":
+      return {
+        cmd: "cmd",
+        // /s + the quoted-empty title are required for `start` to treat the next quoted
+        // token as a URL rather than as the window title.
+        args: ["/s", "/c", "start", '""', "/b", `"${url.replace(/&/g, "^&")}"`],
+        windowsVerbatimArguments: true,
+      };
+    default:
+      return { cmd: "xdg-open", args: [url], windowsVerbatimArguments: false };
+  }
+}
+
 /** Open a URL in the user's default browser. Best-effort — we always print the URL too. */
 export function openBrowser(url: string): void {
-  const cmd =
-    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const { cmd, args, windowsVerbatimArguments } = browserCommand(url);
   try {
-    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    const child = spawn(cmd, args, {
+      stdio: "ignore",
+      detached: true,
+      windowsVerbatimArguments,
+    });
     child.on("error", () => {
       /* headless / no browser — the printed URL is the fallback */
     });
@@ -332,7 +391,7 @@ export async function startLogin(
     throw e;
   }
 
-  const authorizeUrl = `${AUTHORIZE_ENDPOINT}?${new URLSearchParams({
+  const authorizeUrl = `${authorizeEndpoint()}?${new URLSearchParams({
     response_type: "code",
     client_id: clientId,
     redirect_uri: redirectUri,
@@ -340,7 +399,7 @@ export async function startLogin(
     state,
     code_challenge: challenge,
     code_challenge_method: "S256",
-    resource: RESOURCE_URI,
+    resource: resourceUri(),
   }).toString()}`;
 
   const timer = setTimeout(() => {

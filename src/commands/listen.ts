@@ -167,7 +167,8 @@ interface ListenOpts {
   relay?: string | false;
 }
 
-interface Ctx {
+/** Exported so the test suite can drive `handleEvent` directly — see below. */
+export interface Ctx {
   forward?: string;
   secret?: string;
   skipVerify: boolean;
@@ -201,8 +202,12 @@ function enqueue(ctx: Ctx, task: () => Promise<void>): void {
  *
  * `raw` MUST be the exact bytes as received: the HMAC is computed over the raw body,
  * so re-serializing the parsed JSON would silently break every signature.
+ *
+ * EXPORTED for the test suite. "An unverified event is never forwarded" is a security
+ * property, not a nicety, and a security property that is not tested is a wish. Keeping this
+ * function private would have meant testing it only through a real socket + a real relay.
  */
-async function handleEvent(
+export async function handleEvent(
   ctx: Ctx,
   raw: string,
   headers: Record<string, string>,

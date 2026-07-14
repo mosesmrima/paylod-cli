@@ -1,0 +1,10 @@
+{
+  "//": "Test build. Compiles src/ INCLUDING *.test.ts into build/test/, which `npm test` runs with node --test. Kept separate from tsconfig.json so test code can never be published inside dist/.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "build/test",
+    "noEmit": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": []
+}
