@@ -1,7 +1,7 @@
 {
-  "name": "paylod",
+  "name": "@paylod/cli",
   "version": "0.1.0",
-  "description": "The paylod CLI — accept M-Pesa (Safaricom Daraja) payments from your terminal. STK push, live status, webhook forwarding, and offline Daraja error decoding.",
+  "description": "The paylod CLI \u2014 accept M-Pesa (Safaricom Daraja) payments from your terminal. STK push, live status, webhook forwarding, and offline Daraja error decoding.",
   "homepage": "https://paylod.dev/docs/cli",
   "bugs": {
     "url": "https://github.com/paylod/cli/issues"
@@ -55,5 +55,8 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
