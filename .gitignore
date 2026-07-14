@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+.DS_Store
+
+# Never commit a real credential store.
+.paylod/
+paylod.config.json

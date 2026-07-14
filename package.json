@@ -1,0 +1,49 @@
+{
+  "name": "paylod",
+  "version": "0.1.0",
+  "description": "The paylod CLI — accept M-Pesa payments from your terminal. STK push, live status, webhook forwarding, and offline Daraja error decoding.",
+  "type": "module",
+  "bin": {
+    "paylod": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/index.js",
+    "test": "node --test dist/**/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mpesa",
+    "m-pesa",
+    "daraja",
+    "safaricom",
+    "payments",
+    "kenya",
+    "stk-push",
+    "paylod",
+    "cli"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@clack/prompts": "^1.7.0",
+    "commander": "^15.0.0",
+    "nanospinner": "^1.2.2",
+    "picocolors": "^1.1.1"
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "^1.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
