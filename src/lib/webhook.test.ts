@@ -62,6 +62,26 @@ describe("verifySignature: accepts what paylod actually sends", () => {
   test("the header name is the one the worker sends", () => {
     assert.equal(SIGNATURE_HEADER, "x-webhook-signature");
   });
+
+  // SHARED GOLDEN VECTOR — the SAME secret+timestamp+body+expected-hex is pinned, byte-for-byte,
+  // in paylod-sdk (test/webhook.test.ts) and mirrors the backend signer
+  // (supabase/functions/_shared/webhooks/sign.ts). If any of the three signing/verifying impls
+  // drifts, its copy of this vector fails — that is the guard against silent cross-repo drift.
+  // DO NOT edit these literals to "fix" a failure: a mismatch means the scheme itself changed.
+  test("matches the shared golden vector (cross-repo drift guard)", () => {
+    const GOLDEN_SECRET = "whsec_golden_vector_v1";
+    const GOLDEN_T = 1_700_000_000;
+    const GOLDEN_BODY =
+      '{"type":"payment.success","created":1700000000,"data":{"paymentId":"pay_golden","amount":100,"phone":"254712345678"}}';
+    const GOLDEN_HEADER =
+      "t=1700000000,v1=3afe38e4c11734c84fad70dd16bbaeec6057ca998236f253be6bfa09ad2c2eb7";
+
+    // The test helper signs the same way the backend worker does.
+    assert.equal(signWebhook(GOLDEN_SECRET, GOLDEN_BODY, GOLDEN_T), GOLDEN_HEADER);
+    // The production verifier accepts that exact header (freshness disabled — t is fixed/ancient).
+    const r = verifySignature(GOLDEN_BODY, GOLDEN_HEADER, GOLDEN_SECRET, 0);
+    assert.equal(r.valid, true);
+  });
 });
 
 describe("verifySignature: rejects everything else", () => {

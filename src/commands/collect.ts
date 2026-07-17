@@ -29,12 +29,10 @@ import {
 import { renderPayment } from "../lib/render.js";
 import { color as c, emit, isJson, kes, line, spinner, kv, rule } from "../lib/ui.js";
 import { PaylodError } from "../lib/errors.js";
+import { isValidMsisdn } from "../lib/phone.js";
 
 const POLL_INTERVAL_MS = 2_000;
 const DEFAULT_TIMEOUT_SECS = 120;
-
-/** Accepts 0712…, 254712…, +254712…, 0112…, 254112… — same shape the backend accepts. */
-const PHONE_RE = /^(?:\+?254|0)?[17]\d{8}$/;
 
 /**
  * Parse an amount in whole KES, STRICTLY.
@@ -85,7 +83,7 @@ Examples:
           exitCode: 2,
         });
       }
-      if (!PHONE_RE.test(opts.phone)) {
+      if (!isValidMsisdn(opts.phone)) {
         throw new PaylodError(`Invalid phone number: ${opts.phone}`, {
           hint: "Use a Safaricom number, e.g. 254712345678, 0712345678 or +254712345678.",
           exitCode: 2,
