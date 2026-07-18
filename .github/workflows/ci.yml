@@ -1,0 +1,56 @@
+name: CI
+
+# This repo had no CI at all — only release.yml, which runs on a published GitHub Release and so
+# gives no signal on push or PR. `engines.node` was therefore an untested claim.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # MUST stay in sync with `engines.node` in package.json (>=22.12.0).
+      #
+      # The floor was raised from >=20, which this package could not honour:
+      #
+      #   - `commander@15.0.0` itself declares `engines.node: ">=22.12.0"`. A package cannot
+      #     promise more support than its own dependency tree does. On Node 20 `npm install
+      #     --engine-strict` fails outright with EBADENGINE, and a normal install warns.
+      #     (`@clack/prompts` wants >= 20.12.0, so even ">=20" was wrong at the patch level.)
+      #   - `npm test` cannot run below 22 at all: it passes glob patterns to `node --test`, and
+      #     glob support landed after Node 20. On 20 it dies with "Could not find .../*.test.js",
+      #     so ">=20" was a claim no test on this repo could ever have checked.
+      #
+      # Verified at HEAD: the suite passes on 22.23.1 and 24.13.1, and Node 18 cannot even load
+      # the binary (`@clack/core` imports `styleText` from `node:util`, added in 20.12).
+      matrix:
+        node-version: [22, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check vendored Daraja catalog is in sync
+        run: npm run catalog:check
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

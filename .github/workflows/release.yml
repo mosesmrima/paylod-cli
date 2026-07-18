@@ -32,10 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Must satisfy this package's own `engines.node` (>=22.12.0). It was pinned to 20, where the
+      # `npm test` gate below cannot run at all (`node --test` gained glob support after 20), so
+      # the release path would have failed before reaching publish.
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
 
