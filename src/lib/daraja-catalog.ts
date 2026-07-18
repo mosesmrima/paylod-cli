@@ -134,17 +134,126 @@ const PENDING_DESC_RE =
   /\b(?:still\s+under\s+processing|is\s+being\s+processed|still\s+processing|being\s+processed)\b/i;
 
 /**
+ * The ONLY form a Daraja numeric result code is ever written in: bare decimal digits, no sign, no
+ * leading zeros, no exponent, no radix prefix, no fractional part.
+ *
+ * This exists because `Number()` is not a format check. `Number("0e999")`, `Number("+0")`,
+ * `Number("00")`, `Number("0.0")`, `Number("-0")` and `Number("0x0")` are all `0`, so classifying
+ * success with `Number(raw) === 0` accepted six spellings of "I succeeded" that Daraja never
+ * emits — and whoever controls the response body controls that string. The sibling PHP SDK
+ * shipped precisely this and accepted `"0e999"`, `"+0"` and `"00"` as result-code zero.
+ *
+ * Anything failing this test is a code whose FORM we do not recognise. It is neither a success nor
+ * a proven failure; it falls through to the ambiguity rule, which is `pending`.
+ */
+const CANONICAL_CODE_RE = /^(?:0|[1-9][0-9]*)$/;
+
+/**
  * `500.001.1001` is an overloaded Daraja business-error bucket. Under the SAME code it also
  * returns hard, terminal configuration errors. Polling forever on those would be wrong, so a
  * 500.* whose message matches one of these is NOT treated as pending.
  */
 const TERMINAL_500_MESSAGE_RE =
-  /\b(?:wrong\s+credentials|merchant\s+does\s+not\s+exist|invalid\s+access\s+token|unable\s+to\s+lock\s+subscriber)\b/i;
+  /\b(?:wrong\s+credentials|merchant\s+does\s+not\s+exist|invalid\s+access\s+token|unable\s+to\s+lock\s+subscriber|insufficient\s+funds?)\b/i;
 
-/** Normalize a `ResultCode` that Daraja may send as a string OR a number (defensive). */
-function normalizeCode(resultCode: unknown): string {
-  if (resultCode === null || resultCode === undefined) return "";
-  return String(resultCode).trim();
+/**
+ * A dotted Daraja business code — `500.001.1001`, `400.002.02`. Each segment is bare digits; the
+ * FIRST segment carries no leading zero, later segments may (`002` is how Daraja writes them).
+ */
+const CANONICAL_DOTTED_RE = /^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,8}){1,6}$/;
+
+/** An alphanumeric result code — `C2B00011`. Always starts with a letter, never with a digit. */
+const CANONICAL_ALNUM_RE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
+
+/**
+ * What form a `ResultCode` arrived in.
+ *
+ * ── Why this replaced `String(resultCode).trim()` ─────────────────────────────────────────
+ * The strict `raw === "0"` success check was correct, and it was still bypassable — because a
+ * LOWER layer laundered impostors into canonical form before the check ever saw them. `String(x)`
+ * flattens the number `-0` to the string `"0"`, and `.trim()` turns `" 0"`, `"0 "` and a
+ * tab-wrapped zero into `"0"`. Whoever controls the response body controls those bytes, so
+ * normalising BEFORE validating handed them a "declare yourself paid" primitive that sat one
+ * layer beneath the check written to stop exactly that.
+ *
+ * The same laundering ran in the failure direction and was just as expensive: `" 1032"` trimmed
+ * to `"1032"`, which the catalog marks `retryable: true` (cancelled by the customer). A padded
+ * code therefore became a confident, RETRYABLE terminal failure — i.e. an instruction to charge
+ * again — for a payment whose real state nobody knew.
+ *
+ * So the original TYPE and the original BYTES are preserved and judged as they arrived:
+ *
+ *   • `absent`     — null / undefined / the empty string. Nothing was said.
+ *   • `canonical`  — a form Daraja actually emits. Only these can ever mean success, and only
+ *                    these can ever mean a confident terminal failure.
+ *   • `ambiguous`  — anything else. Never success, never a confident terminal failure; it falls
+ *                    through to the ambiguity rule, which is `pending` for the classifier and
+ *                    an explicitly indeterminate decode for humans.
+ *
+ * NOTE on `0.0`: written as a JSON *number* it is not an impostor at all — IEEE-754 has no
+ * distinct value for it, so `0.0` and `0` are the same number and there is nothing left to
+ * detect. Written as the *string* `"0.0"` it is caught here, which is the case that matters:
+ * a string is a spelling somebody chose.
+ */
+export type CodeForm =
+  | { readonly kind: "absent" }
+  | { readonly kind: "canonical"; readonly code: string }
+  | { readonly kind: "ambiguous"; readonly code: string };
+
+/** Render an arbitrary value for a diagnostic message without letting its `toString` throw. */
+function safeRender(v: unknown): string {
+  try {
+    const s = typeof v === "symbol" ? v.toString() : String(v);
+    return s.length > 40 ? `${s.slice(0, 40)}…` : s;
+  } catch {
+    return "[unrenderable]";
+  }
+}
+
+/**
+ * Assess a `ResultCode` WITHOUT normalizing it. No trimming, no coercion, no `String()` on a
+ * number before its type has been checked.
+ */
+export function canonicalCodeForm(resultCode: unknown): CodeForm {
+  if (resultCode === null || resultCode === undefined) return { kind: "absent" };
+
+  if (typeof resultCode === "number") {
+    // NEGATIVE ZERO IS THE ONE NUMBER `===` CANNOT SEE. `-0 === 0` is true and `String(-0)` is
+    // "0", so every check written against either would wave it through. `Object.is` is the only
+    // comparison that distinguishes it, and it must run BEFORE anything stringifies the value.
+    if (Object.is(resultCode, -0)) return { kind: "ambiguous", code: "-0" };
+    if (!Number.isSafeInteger(resultCode) || resultCode < 0) {
+      return { kind: "ambiguous", code: safeRender(resultCode) };
+    }
+    return { kind: "canonical", code: String(resultCode) };
+  }
+
+  // Anything that is not a string or a number (a boolean `false`, an object, an array) is not a
+  // result code at all. `false` coerces to `0` under `Number()` and to `"false"` under `String()`
+  // — neither of which is a thing to reason about.
+  if (typeof resultCode !== "string") return { kind: "ambiguous", code: safeRender(resultCode) };
+
+  if (resultCode === "") return { kind: "absent" };
+  // The bytes are compared AS THEY ARRIVED. A code with surrounding whitespace is not that code
+  // with a formatting quirk; it is a string Daraja never sent.
+  if (
+    CANONICAL_CODE_RE.test(resultCode) ||
+    CANONICAL_DOTTED_RE.test(resultCode) ||
+    CANONICAL_ALNUM_RE.test(resultCode)
+  ) {
+    return { kind: "canonical", code: resultCode };
+  }
+  return { kind: "ambiguous", code: resultCode };
+}
+
+/**
+ * Read a `ResultDesc` as text. It is a CORROBORATING signal drawn from the same untrusted body as
+ * the code, so its type is checked rather than assumed: `(resultDesc ?? "").trim()` threw a raw
+ * `TypeError` out of the middle of the classifier when a body carried an object-valued
+ * `resultDesc`, which surfaced to callers as a crash instead of an indeterminate payment.
+ */
+function descText(resultDesc: unknown): string {
+  return typeof resultDesc === "string" ? resultDesc.trim() : "";
 }
 
 /**
@@ -158,17 +267,27 @@ export function classifyStkResult(
   resultCode: unknown,
   resultDesc?: string | null,
 ): StkOutcome {
-  const raw = normalizeCode(resultCode);
-  const desc = (resultDesc ?? "").trim();
+  const desc = descText(resultDesc);
+  const form = canonicalCodeForm(resultCode);
+
+  // VALIDATION RUNS BEFORE ANY CANONICALISATION IS ALLOWED TO MATTER. A non-canonical code is not
+  // repaired into a canonical one — it is refused a verdict. `pending` is the ambiguity rule: it
+  // is neither success (no order ships) nor a terminal failure (no retry is invited), and it is
+  // never `retryable`, so both money-losing directions are closed.
+  if (form.kind !== "canonical") return "pending";
+  const raw = form.code;
 
   // A terminal 500.* config error must not be mistaken for "still processing".
   if (raw.startsWith("500.") && TERMINAL_500_MESSAGE_RE.test(desc)) return "failed";
 
   if (PENDING_RESULT_CODES.has(raw)) return "pending";
 
-  const n = Number(raw);
-  if (raw !== "" && Number.isFinite(n)) {
-    if (n === 0) return "success";
+  // SUCCESS IS RECOGNISED BY EXACT FORM, NOT BY COERCION. Only the two representations the schema
+  // permits — the number `0` and the string `"0"` — reach here as the normalized `"0"`. See
+  // CANONICAL_CODE_RE for why `Number(raw) === 0` was a "declare yourself paid" primitive.
+  if (raw === "0") return "success";
+
+  if (CANONICAL_CODE_RE.test(raw)) {
     // A known-numeric, non-zero code is terminal — UNLESS the description says otherwise
     // (guards against a new "still processing" code we haven't catalogued yet).
     return PENDING_DESC_RE.test(desc) ? "pending" : "failed";
@@ -244,8 +363,8 @@ function pendingFallback(code: string): DecodedError {
  * Unknown code. The outcome is INDETERMINATE — we cannot prove no money moved — so it is NOT
  * safely retryable. (The old fallback said `retryable: true`, which invited a blind re-charge.)
  */
-function failedFallback(code: string, rawDesc?: string | null): DecodedError {
-  const desc = (rawDesc ?? "").trim();
+function failedFallback(code: string, rawDesc?: unknown): DecodedError {
+  const desc = descText(rawDesc);
   return {
     code,
     title: "Payment failed",
@@ -262,10 +381,62 @@ function failedFallback(code: string, rawDesc?: string | null): DecodedError {
 }
 
 /**
+ * The code arrived in a form Daraja does not emit (` 0`, `-0`, `"00"`, `"0e999"`, `false`, …).
+ *
+ * This is deliberately NOT {@link failedFallback}: a padded or mistyped code is not evidence that
+ * the payment failed, and rendering it as "Payment failed" would be a confident terminal claim
+ * built on a string we refused to understand. It is also NOT {@link pendingFallback}, which would
+ * assert the prompt is live on a handset — equally unfounded. It is `retryable: false`, because
+ * an outcome we cannot read is never proof that no money moved.
+ */
+function indeterminateFallback(raw: string, rawDesc?: unknown): DecodedError {
+  const desc = descText(rawDesc);
+  return {
+    // The raw bytes are NOT echoed into `code`: this field is compared against catalog codes and
+    // rendered in dashboards, and an unrecognised string has no business impersonating one.
+    code: "unknown",
+    title: "Payment outcome unknown",
+    cause:
+      `M-Pesa returned a result code in a form this SDK does not recognise (${JSON.stringify(
+        raw.length > 40 ? `${raw.slice(0, 40)}…` : raw,
+      )})` +
+      (desc.length > 0 ? ` with the description: ${desc}` : "") +
+      ". A code that is not written the way Daraja writes them is not evidence of success or of " +
+      "failure, so no outcome is claimed.",
+    fix:
+      "Re-read the payment with GET /status/:id, or let the webhook settle it. Do NOT charge " +
+      "again on the strength of this response — we cannot prove no money moved.",
+    category: "mpesa_system",
+    retryable: false,
+    customerMessage:
+      "We couldn't confirm this payment yet. Please wait — do not retry — while it settles.",
+  };
+}
+
+/** Strip the internal-only fields off a catalog entry to produce a `DecodedError`. */
+function decodedFrom(code: string, entry: CatalogEntry): DecodedError {
+  const { code: _c, family: _f, sources: _s, ...rest } = entry;
+  return { code, ...rest };
+}
+
+/**
  * Decode a Daraja ResultCode into a normalized, human-readable error.
  *
- * Defers to `classifyStkResult` FIRST, so pending/in-flight codes (4999, 500.001.1001) can
- * never decode as a failure and can never be advertised as retryable.
+ * ── Family-awareness ──────────────────────────────────────────────────────────────────────
+ * The STK "still processing → pending" semantics (and the blank/unknown-numeric → pending
+ * fallback) apply ONLY to the STK result surface. A dotted `api_error` code (e.g. 400.002.02,
+ * 500.001.1001) or an alphanumeric `b2c_c2b_result` code (e.g. C2B00011) is a TERMINAL error;
+ * routing it through `classifyStkResult` used to misclassify it as `pending` and decode it as
+ * "payment still in progress", which is wrong. So we select by family:
+ *
+ *   • STK family: defer to `classifyStkResult`, so 4999 / 500.001.1001 can never decode as a
+ *     failure and can never be advertised as retryable.
+ *   • Non-STK families: decode straight from the catalog by family — no pending semantics. This
+ *     also disambiguates the OVERLOADED 500.001.1001, whose `api_error` entry is the terminal
+ *     "merchant does not exist / insufficient funds" server error.
+ *
+ * If the caller asks for the (default) STK family but the code exists ONLY in non-STK families,
+ * we decode it by its real family rather than letting the STK unknown→pending rule mislabel it.
  *
  * @param resultCode the Daraja ResultCode (number or string). `null`/`undefined` is treated as
  *   an unknown/indeterminate outcome.
@@ -274,26 +445,52 @@ function failedFallback(code: string, rawDesc?: string | null): DecodedError {
  * @param family which Daraja surface the code came from. Defaults to the STK payment path.
  */
 export function decodeDarajaResult(
-  resultCode: number | string | null | undefined,
+  resultCode: unknown,
   rawDesc?: string | null,
   family: DarajaFamily = "stk_result",
 ): DecodedError {
-  const code = normalizeCode(resultCode);
+  const form = canonicalCodeForm(resultCode);
 
   // An ABSENT code is not evidence of an in-flight payment — it is simply unknown. (The
   // classifier maps blank → `pending` on purpose, but that is a *polling* decision for the
   // engine; for a human/agent-facing decode it would be a lie.) Indeterminate ⇒ not retryable.
-  if (code === "") return failedFallback("unknown", rawDesc);
+  if (form.kind === "absent") return failedFallback("unknown", descText(rawDesc) || null);
 
-  const outcome = classifyStkResult(code, rawDesc);
-  const entry = pickEntry(code, family, outcome);
+  // A NON-CANONICAL code never reaches the catalog lookup. This is the decode-side half of the
+  // same ordering rule the classifier enforces: normalisation must not manufacture a catalog hit.
+  // `" 1032"` used to trim to `"1032"` and decode as the catalog's `retryable: true` cancellation.
+  if (form.kind === "ambiguous") return indeterminateFallback(form.code, rawDesc);
+  const code = form.code;
 
-  if (entry) {
-    const { code: _c, family: _f, sources: _s, ...rest } = entry;
-    return { code, ...rest };
+  const matches = ALL_ENTRIES.filter((e) => e.code === code);
+  const hasStk = matches.some((e) => e.family === "stk_result");
+
+  // If STK was requested but the code is not an STK code, decode it by the family it DOES have.
+  const effectiveFamily: DarajaFamily =
+    family === "stk_result" && !hasStk && matches.length > 0 ? matches[0]!.family : family;
+
+  if (effectiveFamily === "stk_result") {
+    const outcome = classifyStkResult(code, rawDesc);
+    const entry = pickEntry(code, effectiveFamily, outcome);
+    if (entry) return decodedFrom(code, entry);
+    if (outcome === "pending") return pendingFallback(code);
+    return failedFallback(code || "unknown", rawDesc);
   }
 
-  if (outcome === "pending") return pendingFallback(code);
+  // Terminal (api_error / b2c_c2b_result): no STK pending semantics, EVER. Select only the entry
+  // for the requested family, or — failing that — another NON-STK entry for the same code.
+  //
+  // Falling back to `matches[0]` here was a live bug: a code that exists ONLY under `stk_result`
+  // (e.g. 4999, "still waiting for the customer's PIN") would, when explicitly decoded as
+  // `api_error` or `b2c_c2b_result`, come back as the STK *pending* entry — telling the caller a
+  // terminal API/result failure was a payment still in flight. That is the exact "false pending"
+  // shape of the 4999 double-charge bug, just reached from the other direction. An STK entry can
+  // never describe a non-STK surface, so when no non-STK entry exists we return the terminal,
+  // non-retryable fallback instead.
+  const entry =
+    matches.find((e) => e.family === effectiveFamily) ??
+    matches.find((e) => e.family !== "stk_result");
+  if (entry) return decodedFrom(code, entry);
   return failedFallback(code || "unknown", rawDesc);
 }
 
